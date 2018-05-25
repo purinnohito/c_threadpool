@@ -17,7 +17,7 @@ typedef struct c_ThreadPool_queue_  c_ThreadPool_queue;
 typedef struct c_ThreadPool_struct_ c_ThreadPool_st;
 typedef void(c_pool_task)(void*);
 typedef void*(async_task)(void*);
-#define DEFAULT_BUFFER_SIZE 500
+#define DEFAULT_BUFFER_SIZE 1000
 
 /**
 * Create a newly allocated thread pool.

@@ -226,8 +226,8 @@ static inline int c_ThreadPool_loop_stop_cb(void *ptr)
         thrd_join(pool->threads[i].thread, NULL);
         --(pool->num_of_threads);
     }
-    while (pool->add_queue.size) {
-        c_ThreadPool_node* task = c_ThreadPool_queue_pop_front(&pool->add_queue);
+    c_ThreadPool_node* task = NULL;
+    while (task = c_ThreadPool_get_task(pool)) {
         free(task);
     }
     free(pool->threads);
@@ -329,11 +329,17 @@ static inline bool c_ThreadPool_check_Buffer(c_ThreadPool_Buffer *buf) {
 static inline void c_ThreadPool_charge_Buffer(c_ThreadPool_Buffer *buf, c_ThreadPool_queue *queue)
 {
     buf->stock = buf->index = 0;
-    c_ThreadPool_node* getNode = c_ThreadPool_queue_pop_front(queue);
-    for (uint32_t i = 0; (i < DEFAULT_BUFFER_SIZE) && getNode!=NULL; ++i) {
-        buf->nodeBuffer[(buf->stock)++] = getNode;
+    c_ThreadPool_node* getNode;
+    uint32_t i = 0;
+    do
+    {
         getNode = c_ThreadPool_queue_pop_front(queue);
-    }
+        if (!getNode) {
+            break;
+        }
+        buf->nodeBuffer[(buf->stock)++] = getNode;
+        ++i;
+    } while ((i < DEFAULT_BUFFER_SIZE) && getNode != NULL);
 }
 
 /* BUFFERからデータ取得 */
