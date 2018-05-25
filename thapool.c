@@ -21,9 +21,10 @@ struct c_ThreadPool_queue_
     volatile uint32_t   size;
     mtx_t               q_mutex;
     cnd_t               cond;
+    mtx_t               wait_mutex;
 };
 
-// TODO:popバッファ
+/* pop buffer */
 typedef struct c_ThreadPool_Buffer_ {
     c_ThreadPool_node*      nodeBuffer[DEFAULT_BUFFER_SIZE];
     uint32_t                stock;
@@ -76,7 +77,7 @@ static inline int c_ThreadPool_queue_push_back(c_ThreadPool_queue *queue, c_Thre
 
 
 /* 初期化処理 */
-c_ThreadPool_st* c_ThreadPool_init(uint32_t num_of_threads) {
+c_ThreadPool_st* c_ThreadPool_init_pool(uint32_t num_of_threads) {
     /* プール作成 */
     c_ThreadPool_st *pool = malloc(sizeof(c_ThreadPool_st));
     if (pool == NULL) {
@@ -89,6 +90,9 @@ c_ThreadPool_st* c_ThreadPool_init(uint32_t num_of_threads) {
         goto ERROR_TAG;
     }
     if (mtx_init(&(pool->add_queue.q_mutex), mtx_recursive)) {
+        goto ERROR_TAG;
+    }
+    if (mtx_init(&(pool->add_queue.wait_mutex), mtx_plain)) {
         goto ERROR_TAG;
     }
     if (mtx_init(&(pool->get_buffer.b_mutex), mtx_plain)) {
@@ -120,29 +124,29 @@ c_ThreadPool_st* c_ThreadPool_init(uint32_t num_of_threads) {
     }
     /* 起動まで成功したら生成したプール構造体返す */
     return pool;
-    //// 最初にc_ThreadPool_bufferをDEFAULT_POOL_SIZE個+st_Refcounterの領域確保
-    //st_Refcounter* refPtr = refAlloc(sizeof(c_ThreadPool_buffer)*DEFAULT_POOL_SIZE)
 ERROR_TAG:
     free(pool);
     return NULL;
 }
 
-//TODO:ウェイト用にブロック引数追加必要
-//TODO:ウェイト待ちの間はアッドは待機or失敗
 // タスク追加
 int c_ThreadPool_add_task(c_ThreadPool_st *pool, c_pool_task *task_cb, void *data)
 {
+    int error = 0;
     if (pool == NULL) {
         return -1;
     }
-
-    // タスク構造体の取得(Bufferからor新規作成)
+    /* タスク完了待ち中は待機 */
+    if (mtx_lock(&(pool->add_queue.wait_mutex))) {
+        return -1;
+    }
     /**
-    * キューの生成or取得
+    * キューの生成
     */
     c_ThreadPool_node *node = malloc(sizeof(c_ThreadPool_node));
     if (node == NULL) {
-        return -1;
+        error = -1;
+        goto ADD_TASK_ERROR;
     }
     /* ノードのタスクに追加 */
     node->data = data;
@@ -150,19 +154,46 @@ int c_ThreadPool_add_task(c_ThreadPool_st *pool, c_pool_task *task_cb, void *dat
 
     int push_error = c_ThreadPool_queue_push_back(&(pool->add_queue), node);
     if (push_error) {
-        return push_error;
+        error = push_error;
+        goto ADD_TASK_ERROR;
     }
     if (cnd_broadcast(&(pool->add_queue.cond))) {
-        return -2;
+        error = -2;
+        goto ADD_TASK_ERROR;
     }
     C_THREADPOOL_TASK_COUNT_ADD(pool->task_size);
+    mtx_unlock(&(pool->add_queue.wait_mutex));
     return 0;
+ADD_TASK_ERROR:
+    mtx_unlock(&(pool->add_queue.wait_mutex));
+    return error;
+}
+
+// wait(タスク完了待ち)
+bool c_ThreadPool_waitTaskComplete(c_ThreadPool_st *pool) {
+    if (mtx_lock(&(pool->add_queue.wait_mutex))) {
+        return false;
+    }
+    bool empty=false;
+    while (pool->isRunning) {
+        mtx_lock(&(pool->task_size.mutex));
+        empty = pool->task_size.size == 0;
+        mtx_unlock(&(pool->task_size.mutex));
+        if (empty) {
+            break;
+        }
+    }
+    mtx_unlock(&(pool->add_queue.wait_mutex));
+    return empty != false;
 }
 
 // 開放処理
-void c_ThreadPool_free(c_ThreadPool_st *pool, bool blocking)
+void c_ThreadPool_free(c_ThreadPool_st *pool, int stop_mode)
 {
-    if (blocking) {
+    if (stop_mode & c_ThreadPool_wait_complete) {
+        c_ThreadPool_waitTaskComplete(pool);
+    }
+    if (stop_mode & c_ThreadPool_blocking) {
         c_ThreadPool_loop_stop_cb(pool);
     }
     else {
@@ -173,7 +204,6 @@ void c_ThreadPool_free(c_ThreadPool_st *pool, bool blocking)
         thrd_detach(thr);
     }
 }
-//TODO:ウェイト処理を追加
 
 /**
 * スレッドプールのタスクプール
@@ -203,7 +233,6 @@ static inline int c_ThreadPool_loop(void *data)
 
 /**
 * ワーカータスクプールの停止処理
-//TODO:今ある処理は全部待つタイプの実装も必要
 * @param ptr Pool to stop worker thread
 * @return 0
 */
@@ -339,7 +368,7 @@ static inline void c_ThreadPool_charge_Buffer(c_ThreadPool_Buffer *buf, c_Thread
         }
         buf->nodeBuffer[(buf->stock)++] = getNode;
         ++i;
-    } while ((i < DEFAULT_BUFFER_SIZE) && getNode != NULL);
+    } while (i < DEFAULT_BUFFER_SIZE);
 }
 
 /* BUFFERからデータ取得 */
