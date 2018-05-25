@@ -9,19 +9,20 @@ extern "C"
 #include "threads.h"
 #include <stdbool.h>
 
+//TODO:ヘッダオンリーモード用定数判定
+//TODO:ヘッダオンリーモードで公開関数にstatic inlineつける定数宣言
 
 typedef struct c_ThreadPool_node_ c_ThreadPool_node;
-typedef struct c_ThreadPool_buffer_ c_ThreadPool_buffer;
+typedef struct c_ThreadPool_queue_  c_ThreadPool_queue;
 typedef struct c_ThreadPool_struct_ c_ThreadPool_st;
-typedef struct task_c_ThreadPool_ c_ThreadPool_task;
 typedef void(c_pool_task)(void*);
 typedef void*(async_task)(void*);
-#define DEFAULT_POOL_SIZE 500
+#define DEFAULT_BUFFER_SIZE 500
 
 /**
 * Create a newly allocated thread pool.
 */
-c_ThreadPool_st* c_ThreadPool_init(UINT32 num_of_threads);
+c_ThreadPool_st* c_ThreadPool_init(uint32_t num_of_threads);
 
 /**
 * Add routines to be executed by the thread pool.

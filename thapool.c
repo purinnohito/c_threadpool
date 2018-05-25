@@ -5,78 +5,103 @@
 #include <stdio.h>
 
 
-
+/* task node */
 struct c_ThreadPool_node_ 
 {
-    c_ThreadPool_node *forward;
-    c_ThreadPool_node *next;
-
-    c_ThreadPool_task *task;
-
-    volatile bool     dynamic_alloc;
+    c_ThreadPool_node*  next;
+    c_pool_task*        task_cb;
+    void*               data;
 };
 
-struct c_ThreadPool_buffer_
+/* add queue */
+struct c_ThreadPool_queue_
 {
-    //Bufferはメモリ確保を減らすため固定エリア＋溢れたら動的確保
-    //c_ThreadPool_node   queue_fixed[DEFAULT_POOL_SIZE];
-    c_ThreadPool_node   *queue_head;
-    c_ThreadPool_node   *queue_tail;
-    volatile UINT32     num_of_queue;
+    c_ThreadPool_node*  head;
+    c_ThreadPool_node*  tail;
+    volatile uint32_t   size;
+    mtx_t               q_mutex;
+    cnd_t               cond;
 };
+
+// TODO:popバッファ
+typedef struct c_ThreadPool_Buffer_ {
+    c_ThreadPool_node*      nodeBuffer[DEFAULT_BUFFER_SIZE];
+    uint32_t                stock;
+    uint32_t                index;
+    mtx_t                   b_mutex;
+}c_ThreadPool_Buffer;
 
 typedef struct c_ThreadPool_thrd_t_{
 	thrd_t              thread;
-	c_ThreadPool_st*    parent;//親へのポインタ、空になったら終了する
+	c_ThreadPool_st*    parent;//TODO:親へのポインタ、空になったら終了する
 }c_ThreadPool_thrd;
 
+
+typedef struct c_ThreadPool_task_size_ {
+    uint32_t    size;
+    mtx_t       mutex;/* タスク操作ロック */
+}c_ThreadPool_task_size;
 
 struct c_ThreadPool_struct_ {
 
     c_ThreadPool_thrd   *threads;
-    volatile UINT32     num_of_threads;
+    volatile uint32_t   num_of_threads;
 
-    //Bufferはメモリ確保を減らすため固定エリア＋溢れたら動的確保
-    c_ThreadPool_buffer queue;
+    /* 追加キュー */
+    c_ThreadPool_queue      add_queue;
+    /* 取り出しバッファ */
+    c_ThreadPool_Buffer     get_buffer;
+    /* 終了してないタスクの数を管理させる */
+    c_ThreadPool_task_size  task_size;
+    
 
     volatile bool       isRunning;
-    cnd_t               queue_cnd;
-    mtx_t               queue_mutex;
+    mtx_t               pool_mutex;//構造体ロック
 };
+#define C_THREADPOOL_TASK_COUNT_ADD(_task_size)     mtx_lock(&((_task_size).mutex));++((_task_size).size);mtx_unlock(&((_task_size).mutex));
+#define C_THREADPOOL_TASK_COUNT_DEC(_task_size)     mtx_lock(&((_task_size).mutex));--((_task_size).size);mtx_unlock(&((_task_size).mutex));
 
-struct task_c_ThreadPool_
-{
-    c_pool_task     *task_cb;
-    void            *data;
-};
 #define C_THREADPOOL_TASK_INIT(task)    ((task)->data = (task)->task_cb = NULL)
 
 /* prototype */
 
 static inline int c_ThreadPool_loop(void *data);
 static inline int c_ThreadPool_loop_stop_cb(void *ptr);
-static inline c_ThreadPool_node *c_ThreadPool_get_node(c_ThreadPool_buffer *queue);
-static inline c_ThreadPool_task* c_ThreadPool_get_task(c_ThreadPool_st *pool);
-static inline void *c_ThreadPool_queue_pop_front(c_ThreadPool_buffer *queue);
+static inline c_ThreadPool_node* c_ThreadPool_get_task(c_ThreadPool_st *pool);
+static inline bool c_ThreadPool_check_Buffer(c_ThreadPool_Buffer *buf);
+static inline void c_ThreadPool_charge_Buffer(c_ThreadPool_Buffer *buf, c_ThreadPool_queue *queue);
+static inline c_ThreadPool_node* c_ThreadPool_get_Buffer_front(c_ThreadPool_Buffer *buf);
+static inline c_ThreadPool_node* c_ThreadPool_queue_pop_front(c_ThreadPool_queue *queue);
+static inline int c_ThreadPool_queue_push_back(c_ThreadPool_queue *queue, c_ThreadPool_node* node);
 
 
-// 初期化処理
-c_ThreadPool_st* c_ThreadPool_init(UINT32 num_of_threads) {
+/* 初期化処理 */
+c_ThreadPool_st* c_ThreadPool_init(uint32_t num_of_threads) {
     /* プール作成 */
     c_ThreadPool_st *pool = malloc(sizeof(c_ThreadPool_st));
     if (pool == NULL) {
         return NULL;
     }
+    memset(pool, 0, sizeof(c_ThreadPool_st));
+    pool->isRunning = true;
     /* mutex init */
-    if (mtx_init(&(pool->queue_mutex), mtx_plain)) {
+    if (mtx_init(&(pool->pool_mutex), mtx_plain)) {
         goto ERROR_TAG;
     }
-    /* cnd init */
-    if (cnd_init(&(pool->queue_cnd))) {
+    if (mtx_init(&(pool->add_queue.q_mutex), mtx_recursive)) {
+        goto ERROR_TAG;
+    }
+    if (mtx_init(&(pool->get_buffer.b_mutex), mtx_plain)) {
+        goto ERROR_TAG;
+    }
+    if (mtx_init(&(pool->task_size.mutex), mtx_plain)) {
         goto ERROR_TAG;
     }
     /* threadプール(タスク領域)初期化 */
-    memset(&pool->queue, 0, sizeof(pool->queue));
+    /* cnd init */
+    if (cnd_init(&(pool->add_queue.cond))) {
+        goto ERROR_TAG;
+    }
     /* 各スレッド生成 */
     pool->threads = malloc(sizeof(c_ThreadPool_thrd) * num_of_threads);
     if (pool->threads == NULL) {
@@ -102,55 +127,35 @@ ERROR_TAG:
     return NULL;
 }
 
+//TODO:ウェイト用にブロック引数追加必要
+//TODO:ウェイト待ちの間はアッドは待機or失敗
 // タスク追加
 int c_ThreadPool_add_task(c_ThreadPool_st *pool, c_pool_task *task_cb, void *data)
 {
     if (pool == NULL) {
         return -1;
     }
-    if (mtx_lock(&(pool->queue_mutex))) {
-        return -1;
-    }
 
     // タスク構造体の取得(Bufferからor新規作成)
-    c_ThreadPool_node *node = c_ThreadPool_get_node(&(pool->queue));
+    /**
+    * キューの生成or取得
+    */
+    c_ThreadPool_node *node = malloc(sizeof(c_ThreadPool_node));
     if (node == NULL) {
-        mtx_unlock(&(pool->queue_mutex));
         return -1;
     }
     /* ノードのタスクに追加 */
-    node->task = malloc(sizeof(c_ThreadPool_task));
-    if (node->task == NULL) {
-        --(pool->queue.num_of_queue);
-        if (node->dynamic_alloc) {
-            free(node);
-        }
-        return -1;
-    }
-    node->task->data = data;
-    node->task->task_cb = task_cb;
+    node->data = data;
+    node->task_cb = task_cb;
 
-    /* ノードの結びつけ */
-    if ((pool->queue.num_of_queue)++ == 0) {
-        pool->queue.queue_head = pool->queue.queue_tail = node;
-        if (cnd_broadcast(&(pool->queue_cnd))) {
-            mtx_unlock(&(pool->queue_mutex));
-            return -1;
-        }
+    int push_error = c_ThreadPool_queue_push_back(&(pool->add_queue), node);
+    if (push_error) {
+        return push_error;
     }
-    else {
-        node->forward = pool->queue.queue_tail;
-        pool->queue.queue_tail = node;
-        pool->queue.queue_tail->forward->next = pool->queue.queue_tail;
+    if (cnd_broadcast(&(pool->add_queue.cond))) {
+        return -2;
     }
-    if (mtx_unlock(&(pool->queue_mutex))) {
-        --(pool->queue.num_of_queue);
-        free(node->task);
-        if (node->dynamic_alloc) {
-            free(node);
-        }
-        return -1;
-    }
+    C_THREADPOOL_TASK_COUNT_ADD(pool->task_size);
     return 0;
 }
 
@@ -168,6 +173,7 @@ void c_ThreadPool_free(c_ThreadPool_st *pool, bool blocking)
         thrd_detach(thr);
     }
 }
+//TODO:ウェイト処理を追加
 
 /**
 * スレッドプールのタスクプール
@@ -177,7 +183,7 @@ void c_ThreadPool_free(c_ThreadPool_st *pool, bool blocking)
 */
 static inline int c_ThreadPool_loop(void *data)
 {
-    c_ThreadPool_task *task;
+    c_ThreadPool_node *task;
     c_ThreadPool_thrd *thrd = (c_ThreadPool_thrd*)data;
     c_ThreadPool_st* pool = thrd->parent;
     while (pool->isRunning && thrd->parent) {
@@ -197,35 +203,32 @@ static inline int c_ThreadPool_loop(void *data)
 
 /**
 * ワーカータスクプールの停止処理
+//TODO:今ある処理は全部待つタイプの実装も必要
 * @param ptr Pool to stop worker thread
 * @return 0
 */
 static inline int c_ThreadPool_loop_stop_cb(void *ptr)
 {
     c_ThreadPool_st *pool = (c_ThreadPool_st*)ptr;
-    if (mtx_lock(&(pool->queue_mutex))) {
+    if (mtx_lock(&(pool->pool_mutex))) {
         return 0;
     }
     pool->isRunning = false;
 
-    if (cnd_broadcast(&(pool->queue_cnd))) {
+    if (cnd_broadcast(&(pool->add_queue.cond))) {
         return 0;
     }
-    if (mtx_unlock(&(pool->queue_mutex))) {
+    if (mtx_unlock(&(pool->pool_mutex))) {
         return 0;
     }
     UINT32 nowTh = pool->num_of_threads;
     for (UINT32 i = 0; i < nowTh; i++) {
         thrd_join(pool->threads[i].thread, NULL);
-        --pool->num_of_threads;
+        --(pool->num_of_threads);
     }
-    while (pool->queue.num_of_queue) {
-        c_ThreadPool_task* task = (c_ThreadPool_task*)c_ThreadPool_queue_pop_front(&pool->queue);
+    while (pool->add_queue.size) {
+        c_ThreadPool_node* task = c_ThreadPool_queue_pop_front(&pool->add_queue);
         free(task);
-        //if (cnd_wait(&(pool->queue_cnd), &(pool->queue_mutex))) {
-        //    mtx_unlock(&(pool->queue_mutex));
-        //    return 0;
-        //}
     }
     free(pool->threads);
     free(pool);
@@ -234,75 +237,45 @@ static inline int c_ThreadPool_loop_stop_cb(void *ptr)
 }
 
 /**
-* キューの生成or取得
+* pop queue
+*
+* @param    queue pointer
+* @return   c_ThreadPool_node* node or NULL 
 */
-static inline c_ThreadPool_node *c_ThreadPool_get_node(c_ThreadPool_buffer *queue)
+static inline c_ThreadPool_node* c_ThreadPool_queue_pop_front(c_ThreadPool_queue *queue)
 {
-    ///* キューが空なら配列の先頭を割り当てる */
-    //if (queue->num_of_queue == 0) {
-    //    return &queue->queue_fixed[0];
-    //}
-    ///* 末尾ポインタが動的確保でなければ、横が開いてるかをチェック */
-    //if (!queue->queue_tail->dynamic_alloc &&
-    //    queue->queue_tail >= &queue->queue_fixed[0] &&
-    //    queue->queue_tail < &queue->queue_fixed[DEFAULT_POOL_SIZE-1] &&
-    //    (queue->queue_tail + sizeof(c_ThreadPool_node))->task == NULL) {
-    //    /* 横があいていれば使う */
-    //    return (queue->queue_tail + sizeof(c_ThreadPool_node));
-    //}
-    ///* 先頭ポインタが動的確保でなければ、手前が開いてるかをチェック */
-    //if (!queue->queue_head->dynamic_alloc &&
-    //    queue->queue_head > &queue->queue_fixed[0] &&
-    //    queue->queue_head <= &queue->queue_fixed[DEFAULT_POOL_SIZE - 1] &&
-    //    (queue->queue_head - sizeof(c_ThreadPool_node))->task == NULL) {
-    //    /* 手前があいていれば使う */
-    //    return (queue->queue_head - sizeof(c_ThreadPool_node));
-    //}
-    ///* 配列の先頭チェック(空いてれば使う) */
-    //if (queue->queue_fixed[0].task == NULL) {
-    //    return &queue->queue_fixed[0];
-    //}
-    ///* 配列の中間チェック(空いてれば使う) */
-    //if (queue->queue_fixed[DEFAULT_POOL_SIZE/2].task == NULL) {
-    //    return &queue->queue_fixed[DEFAULT_POOL_SIZE / 2];
-    //}
-    /* 空きスペースが検索できなければmalloc */
-    c_ThreadPool_node* data = malloc(sizeof(c_ThreadPool_node));
-    data->dynamic_alloc = true;
-    return data;
+    c_ThreadPool_node *head = NULL;
+    if (queue->size == 0) {
+        return head;
+    }
+    head = queue->head;
+    queue->head = head->next;
+    if (--(queue->size) == 0) {
+        queue->head = queue->tail = NULL;
+    }
+    return head;
 }
 
-/**
-* pop front queue
-*
-* @ param queue ptr
-* @ return task, or NULL is returned on failure.
-*/
-static inline void *c_ThreadPool_queue_pop_front(c_ThreadPool_buffer *queue)
+/* push queue */
+static inline int c_ThreadPool_queue_push_back(c_ThreadPool_queue *queue, c_ThreadPool_node* node)
 {
-    if (queue->num_of_queue == 0) {
-        return NULL;
+    if (mtx_lock(&(queue->q_mutex))) {
+        return -1;
     }
-    void *data = queue->queue_head->task;
-    if (queue->num_of_queue > 1) {
-        c_ThreadPool_node *next = queue->queue_head->next;
-        // dynamic_allocが有る(動的確保)なら開放
-        if (queue->queue_head->dynamic_alloc) {
-            free(queue->queue_head);
-        }
-        else {
-            queue->queue_head->task = NULL;
-        }
-        queue->queue_head = next;
-        queue->queue_head->forward = NULL;
+    /* ノードの結びつけ */
+    if (!queue->head) {
+        queue->head = node;
+        node->next = NULL;
     }
-
-    if (--(queue->num_of_queue) == 0) {
-        queue->queue_head = NULL;
-        queue->queue_tail = NULL;
+    else {
+        queue->tail->next = node;
     }
-
-    return data;
+    queue->tail = node;
+    ++(queue->size);
+    if (mtx_unlock(&(queue->q_mutex))) {
+        return -2;
+    }
+    return 0;
 }
 
 /**
@@ -310,29 +283,63 @@ static inline void *c_ThreadPool_queue_pop_front(c_ThreadPool_buffer *queue)
 * @param c_ThreadPool_st
 * @return c_ThreadPool_task* or NULL
 */
-static inline c_ThreadPool_task* c_ThreadPool_get_task(c_ThreadPool_st *pool)
+static inline c_ThreadPool_node* c_ThreadPool_get_task(c_ThreadPool_st *pool)
 {
-    if (mtx_lock(&(pool->queue_mutex))) {
+    if (mtx_lock(&(pool->get_buffer.b_mutex))) {
         return NULL;
     }
-    /* pool->num_of_queue empty loop */
-    while (!pool->queue.num_of_queue) {
-        if (!pool->isRunning)
-        {
-            cnd_broadcast(&(pool->queue_cnd));
-            mtx_unlock(&(pool->queue_mutex));
-            return NULL;
+    /* Bufferの取得が必要かのチェック */
+    if (c_ThreadPool_check_Buffer(&(pool->get_buffer))) {
+        if (mtx_lock(&(pool->add_queue.q_mutex))) {
+            goto UNLOCK_GET_TASK;
         }
-        /* Block until a new task comes in */
-        if (cnd_wait(&(pool->queue_cnd), &(pool->queue_mutex))) {
-            mtx_unlock(&(pool->queue_mutex));
-            return NULL;
+        /* pool->num_of_queue empty loop */
+        while (pool->add_queue.size == 0) {
+            if (!pool->isRunning) {
+                mtx_unlock(&(pool->add_queue.q_mutex));
+                cnd_broadcast(&(pool->add_queue.cond));
+                goto UNLOCK_GET_TASK;
+            }
+            /* Block until a new task comes in */
+            if (cnd_wait(&(pool->add_queue.cond), &(pool->add_queue.q_mutex))) {
+                mtx_unlock(&(pool->add_queue.q_mutex));
+                goto UNLOCK_GET_TASK;
+            }
         }
+        /* キューからBufferにデータ移動 */
+        c_ThreadPool_charge_Buffer(&(pool->get_buffer), &(pool->add_queue));
+        mtx_unlock(&(pool->add_queue.q_mutex));
     }
-    c_ThreadPool_task* task = (c_ThreadPool_task*)c_ThreadPool_queue_pop_front(&(pool->queue));
-    mtx_unlock(&(pool->queue_mutex));
-
+    /* Bufferから取り出し */
+    c_ThreadPool_node* task = c_ThreadPool_get_Buffer_front(&(pool->get_buffer));
+    mtx_unlock(&(pool->get_buffer.b_mutex));
+    C_THREADPOOL_TASK_COUNT_DEC(pool->task_size);
     return task;
+UNLOCK_GET_TASK:
+    mtx_unlock(&(pool->get_buffer.b_mutex));
+    return NULL;
+}
+
+/* Bufferの取得が必要かのチェック */
+static inline bool c_ThreadPool_check_Buffer(c_ThreadPool_Buffer *buf) {
+    return  buf->index == buf->stock;
+}
+
+/* キューからBufferにデータ移動 */
+static inline void c_ThreadPool_charge_Buffer(c_ThreadPool_Buffer *buf, c_ThreadPool_queue *queue)
+{
+    buf->stock = buf->index = 0;
+    c_ThreadPool_node* getNode = c_ThreadPool_queue_pop_front(queue);
+    for (uint32_t i = 0; (i < DEFAULT_BUFFER_SIZE) && getNode!=NULL; ++i) {
+        buf->nodeBuffer[(buf->stock)++] = getNode;
+        getNode = c_ThreadPool_queue_pop_front(queue);
+    }
+}
+
+/* BUFFERからデータ取得 */
+static inline c_ThreadPool_node* c_ThreadPool_get_Buffer_front(c_ThreadPool_Buffer *buf)
+{
+    return buf->nodeBuffer[(buf->index)++];
 }
 
 
