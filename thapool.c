@@ -1,4 +1,25 @@
-﻿
+﻿/*
+thapool.c
+- ThreadPool & future promis
+
+Written in 2018/05/26 by purinnohito
+
+To the extent possible under law, the author(s)
+have dedicated all copyright and related and neighboring
+rights to this software to the public domain worldwide.
+This software is distributed without any warranty.
+
+You should have received a copy of the CC0 Public Domain
+Dedication along with this software.If not, see
+<https://creativecommons.org/publicdomain/zero/1.0/deed.ja>.
+*/
+#ifndef THA_POOL_C_
+#define THA_POOL_C_
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+
 #include "thapool.h"
 
 #include <stdlib.h>
@@ -77,7 +98,7 @@ static inline int c_ThreadPool_queue_push_back(c_ThreadPool_queue *queue, c_Thre
 
 
 /* 初期化処理 */
-c_ThreadPool_st* c_ThreadPool_init_pool(uint32_t num_of_threads) {
+HEDER_INLINE c_ThreadPool_st* c_ThreadPool_init_pool(uint32_t num_of_threads) {
     /* プール作成 */
     c_ThreadPool_st *pool = malloc(sizeof(c_ThreadPool_st));
     if (pool == NULL) {
@@ -130,7 +151,7 @@ ERROR_TAG:
 }
 
 // タスク追加
-int c_ThreadPool_add_task(c_ThreadPool_st *pool, c_pool_task *task_cb, void *data)
+HEDER_INLINE int c_ThreadPool_add_task(c_ThreadPool_st *pool, c_pool_task *task_cb, void *data)
 {
     int error = 0;
     if (pool == NULL) {
@@ -170,7 +191,7 @@ ADD_TASK_ERROR:
 }
 
 // wait(タスク完了待ち)
-bool c_ThreadPool_waitTaskComplete(c_ThreadPool_st *pool) {
+HEDER_INLINE bool c_ThreadPool_waitTaskComplete(c_ThreadPool_st *pool) {
     if (mtx_lock(&(pool->add_queue.wait_mutex))) {
         return false;
     }
@@ -188,7 +209,7 @@ bool c_ThreadPool_waitTaskComplete(c_ThreadPool_st *pool) {
 }
 
 // 開放処理
-void c_ThreadPool_free(c_ThreadPool_st *pool, int stop_mode)
+HEDER_INLINE void c_ThreadPool_free(c_ThreadPool_st *pool, int stop_mode)
 {
     if (stop_mode & c_ThreadPool_wait_complete) {
         c_ThreadPool_waitTaskComplete(pool);
@@ -381,7 +402,7 @@ static inline c_ThreadPool_node* c_ThreadPool_get_Buffer_front(c_ThreadPool_Buff
 /**
 promise(生成)処理
 */
-promise_t* make_promise()
+static inline promise_t* make_promise()
 {
     promise_t* n_futuer = malloc(sizeof(promise_t));
     n_futuer->callbackFunc = NULL;
@@ -397,7 +418,7 @@ promise_t* make_promise()
 /**
 promise(set)処理
 */
-int set_promise(promise_t* n_futuer, void *result) {
+HEDER_INLINE int set_promise(promise_t* n_futuer, void *result) {
     if (mtx_lock(&(n_futuer->future_mutex))) {
         return 0;
     }
@@ -425,7 +446,7 @@ static inline int asyncFunc(void *data)
 /**
 async処理
 */
-promise_t* async_futuer(int state, async_task *routine, void *data)
+HEDER_INLINE promise_t* async_futuer(int state, async_task *routine, void *data)
 {
     if (!routine) {
         return NULL;
@@ -448,7 +469,7 @@ promise_t* async_futuer(int state, async_task *routine, void *data)
 /**
 async(pool)処理
 */
-promise_t* async_pool(c_ThreadPool_st *pool, async_task *routine, void *data, int blocking)
+HEDER_INLINE promise_t* async_pool(c_ThreadPool_st *pool, async_task *routine, void *data, int blocking)
 {
     if (pool == NULL || !routine) {
         return NULL;
@@ -466,7 +487,7 @@ promise_t* async_pool(c_ThreadPool_st *pool, async_task *routine, void *data, in
 future処理
 最適化禁止マーク必要
 */
-void* get_future(promise_t* n_futuer)
+HEDER_INLINE void* get_future(promise_t* n_futuer)
 {
     void* result = NULL;
     if (n_futuer->state == promise_deferred) {
@@ -492,3 +513,10 @@ void* get_future(promise_t* n_futuer)
 /**
 TODO:並列for処理
 */
+
+
+
+#ifdef __cplusplus
+}
+#endif
+#endif // !THA_POOL_C_

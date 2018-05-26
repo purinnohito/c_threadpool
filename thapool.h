@@ -1,5 +1,28 @@
-﻿#ifndef THAPOOL_H_
+﻿/*
+thapool.h
+- ThreadPool & future promis
+
+Written in 2018/05/26 by purinnohito
+
+To the extent possible under law, the author(s)
+have dedicated all copyright and related and neighboring
+rights to this software to the public domain worldwide.
+This software is distributed without any warranty.
+
+You should have received a copy of the CC0 Public Domain
+Dedication along with this software.If not, see
+<https://creativecommons.org/publicdomain/zero/1.0/deed.ja>.
+*/
+#ifndef THAPOOL_H_
 #define THAPOOL_H_
+
+//TODO:ヘッダオンリーモード用定数判定
+#ifdef THAPOOL_HEADER_ONLY
+#define HEDER_INLINE    static inline
+#else
+#define HEDER_INLINE 
+#endif // !THAPOOL_HEADER_ONLY
+
 
 #include <stdint.h>
 #ifdef __cplusplus
@@ -9,7 +32,7 @@ extern "C"
 #include "threads.h"
 #include <stdbool.h>
 
-//TODO:ヘッダオンリーモード用定数判定
+
 //TODO:ヘッダオンリーモードで公開関数にstatic inlineつける定数宣言
 
 typedef struct c_ThreadPool_node_ c_ThreadPool_node;
@@ -22,16 +45,16 @@ typedef void*(async_task)(void*);
 /**
 * Create a newly allocated thread pool.
 */
-c_ThreadPool_st* c_ThreadPool_init_pool(uint32_t num_of_threads);
+HEDER_INLINE c_ThreadPool_st* c_ThreadPool_init_pool(uint32_t num_of_threads);
 
 /**
 * Add routines to be executed by the thread pool.
 
 */
-int c_ThreadPool_add_task(c_ThreadPool_st *pool, c_pool_task *task_cb, void *data);
+HEDER_INLINE int c_ThreadPool_add_task(c_ThreadPool_st *pool, c_pool_task *task_cb, void *data);
 
 /* ALL task join */
-bool c_ThreadPool_waitTaskComplete(c_ThreadPool_st *pool);
+HEDER_INLINE bool c_ThreadPool_waitTaskComplete(c_ThreadPool_st *pool);
 
 enum c_ThreadPool_stop_mode {
     c_ThreadPool_noBlocking = 0,
@@ -45,7 +68,7 @@ enum c_ThreadPool_stop_mode {
 * Stop all worker threads(stop and exit).Free all allocated memory.
 * Blocking!= 0, calling this function will block until all worker threads are terminated.
 */
-void c_ThreadPool_free(c_ThreadPool_st *pool, int stop_mode);
+HEDER_INLINE void c_ThreadPool_free(c_ThreadPool_st *pool, int stop_mode);
 
 enum promise_state {
     promise_non,
@@ -71,28 +94,33 @@ promise_t* make_promise();
 /**
 promise(set)処理
 */
-int set_promise(promise_t* n_futuer, void *result);
+HEDER_INLINE int set_promise(promise_t* n_futuer, void *result);
 
 /**
 async処理
 */
-promise_t* async_futuer(int state, async_task *routine, void *data);
+HEDER_INLINE promise_t* async_futuer(int state, async_task *routine, void *data);
 
 /**
 async(pool)処理
 */
-promise_t* async_pool(c_ThreadPool_st *pool, async_task *routine, void *data, int blocking);
+HEDER_INLINE promise_t* async_pool(c_ThreadPool_st *pool, async_task *routine, void *data, int blocking);
 
 
 
 /**
 future処理
 */
-void* get_future(promise_t* n_futuer);
+HEDER_INLINE void* get_future(promise_t* n_futuer);
 
 /**
 TODO:並列for処理
 */
+
+
+#ifdef THAPOOL_HEADER_ONLY
+#include "thapool.c"
+#endif // !THAPOOL_HEADER_ONLY
 
 
 #ifdef __cplusplus
