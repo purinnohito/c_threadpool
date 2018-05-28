@@ -16,7 +16,7 @@ Dedication along with this software.If not, see
 #ifndef THAPOOL_H_
 #define THAPOOL_H_
 
-//TODO:ヘッダオンリーモード用定数判定
+// ヘッダオンリーモード用定数判定
 #ifdef THAPOOL_HEADER_ONLY
 #define HEDER_INLINE    static inline
 #else
@@ -33,14 +33,21 @@ extern "C"
 #include <stdbool.h>
 
 
-//TODO:ヘッダオンリーモードで公開関数にstatic inlineつける定数宣言
-
 typedef struct c_ThreadPool_node_ c_ThreadPool_node;
 typedef struct c_ThreadPool_queue_  c_ThreadPool_queue;
 typedef struct c_ThreadPool_struct_ c_ThreadPool_st;
 typedef void(c_pool_task)(void*);
 typedef void*(async_task)(void*);
 #define DEFAULT_BUFFER_SIZE 1000
+
+/* task node */
+struct c_ThreadPool_node_ 
+{
+    c_ThreadPool_node*  next;
+    c_pool_task*        task_cb;
+    void*               data;
+    c_pool_task*        datafree_cb;
+};
 
 /**
 * Create a newly allocated thread pool.
@@ -49,12 +56,14 @@ HEDER_INLINE c_ThreadPool_st* c_ThreadPool_init_pool(uint32_t num_of_threads);
 
 /**
 * Add routines to be executed by the thread pool.
-
 */
 HEDER_INLINE int c_ThreadPool_add_task(c_ThreadPool_st *pool, c_pool_task *task_cb, void *data);
-
-/* ALL task join */
+HEDER_INLINE int c_ThreadPool_add_task_ex(c_ThreadPool_st *pool, c_pool_task *task_cb, void *data, c_pool_task *datafree_cb);
+/* wait ALL task complete */
 HEDER_INLINE bool c_ThreadPool_waitTaskComplete(c_ThreadPool_st *pool);
+
+//TODO:取り出したら開放&開放関数呼び出しする旨記述
+HEDER_INLINE c_ThreadPool_node* c_ThreadPool_get_next_task(c_ThreadPool_st *pool);
 
 enum c_ThreadPool_stop_mode {
     c_ThreadPool_noBlocking = 0,
@@ -83,6 +92,8 @@ typedef struct promise_object_
     cnd_t cond;
     volatile int    state;  //
     async_task *callbackFunc;   //処理関数
+    c_pool_task *datafree_cb;
+    thrd_t* thr;
     void *data;                 //引数データ
     void *result;               //結果
 }promise_t;
@@ -99,7 +110,7 @@ HEDER_INLINE int set_promise(promise_t* n_futuer, void *result);
 /**
 async処理
 */
-HEDER_INLINE promise_t* async_futuer(int state, async_task *routine, void *data);
+//HEDER_INLINE promise_t* async_futuer(int state, async_task *routine, void *data, c_pool_task *datafree_cb);
 
 /**
 async(pool)処理

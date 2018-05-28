@@ -25,21 +25,43 @@ Dedication along with this software.If not, see
 //namespace cpp_pool {
 
 class cppThreadPool {
-    std::shared_ptr<c_ThreadPool_st> _thPool;
-    //std::shared_ptr<std::set<MyFunc_st> > _myfuncst;
-    bool    _freeBlock;
+    typedef std::unique_ptr<c_ThreadPool_st, std::function<void(c_ThreadPool_st*)> > PoolPtr;
+    PoolPtr _thPool;
+    int    _freeBlock;
 public:
-    cppThreadPool():_freeBlock(c_ThreadPool_wait_complete) {}
-    cppThreadPool(uint32_t thCnt):_freeBlock(c_ThreadPool_wait_complete) { initPool(thCnt); }
+    cppThreadPool() :_freeBlock(c_ThreadPool_wait_complete) {}
+    cppThreadPool(uint32_t thCnt) :_freeBlock(c_ThreadPool_wait_complete) { initPool(thCnt); }
     ~cppThreadPool() { _thPool.reset(); }
 
-    //bool addTask(_F func) { return addTaskFunc([func](void*){ func(); },(void*)NULL); }
+    template<class _F>
+    bool addTask(_F func) { return addTaskFunc([func](void*) { func(); }, (void*)NULL); }
     template<class _F, class _P>
-    bool addTask(_F func, _P* data) { return addTaskFunc(func,data); }
+    bool addTask(_F func, _P* data) { return addTaskFunc(func, data); }
+
+    bool  WaitAllComplete() {
+        return c_ThreadPool_waitTaskComplete(_thPool.get());
+    }
+    typedef std::function<void(c_ThreadPool_node*)>    node_delegate;
+    typedef std::unique_ptr<c_ThreadPool_node, node_delegate> unque_node_ptr;
+    unque_node_ptr getNextTask() {
+        return unque_node_ptr(c_ThreadPool_get_next_task(_thPool.get()),
+            node_delegate([](c_ThreadPool_node* task) {
+            if (task) {
+                if (task->datafree_cb) {
+                    task->datafree_cb(task->data);
+                }
+                free(task);
+            }
+        }));
+    }
+    //TODO:join
+    //TODO:threads
+    //TODO:get_thPool
+    //TODO:async pool
 
     bool initPool(uint32_t thCnt) {
-        bool& fBlock = _freeBlock;
-        _thPool.reset(c_ThreadPool_init_pool(thCnt),
+        auto& fBlock = _freeBlock;
+        _thPool = PoolPtr(c_ThreadPool_init_pool(thCnt),
             [&fBlock](c_ThreadPool_st* pPool) {
             c_ThreadPool_free(pPool, fBlock);
         });
@@ -54,10 +76,10 @@ private:
     };
     template<class _F, class _P>
     bool addTaskFunc(_F func, void* data) {
-        MyFunc_st* fst = new MyFunc_st<_P>;
+        auto fst = new MyFunc_st<_P>;
         fst->func = func;
         fst->data = data;
-        int ret = c_ThreadPool_add_task(_thPool.get(), cppThreadPool::lamdaCall<_P>, fst);
+        int ret = c_ThreadPool_add_task_ex(_thPool.get(), cppThreadPool::lamdaCall<_P>, fst, cppThreadPool::delCall<_P>);
         return ret == 0;
     }
 
@@ -67,6 +89,10 @@ private:
         if (fSt) {
             fSt->func(fSt->data);
         }
+    }
+    template<class _P>
+    static void delCall(void* data) {
+        auto fSt = static_cast<MyFunc_st<_P>*>(data);
         delete fSt;
     }
 };

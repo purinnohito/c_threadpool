@@ -26,14 +26,6 @@ extern "C"
 #include <stdio.h>
 
 
-/* task node */
-struct c_ThreadPool_node_ 
-{
-    c_ThreadPool_node*  next;
-    c_pool_task*        task_cb;
-    void*               data;
-};
-
 /* add queue */
 struct c_ThreadPool_queue_
 {
@@ -83,13 +75,11 @@ struct c_ThreadPool_struct_ {
 #define C_THREADPOOL_TASK_COUNT_ADD(_task_size)     mtx_lock(&((_task_size).mutex));++((_task_size).size);mtx_unlock(&((_task_size).mutex));
 #define C_THREADPOOL_TASK_COUNT_DEC(_task_size)     mtx_lock(&((_task_size).mutex));--((_task_size).size);mtx_unlock(&((_task_size).mutex));
 
-#define C_THREADPOOL_TASK_INIT(task)    ((task)->data = (task)->task_cb = NULL)
-
 /* prototype */
 
 static inline int c_ThreadPool_loop(void *data);
 static inline int c_ThreadPool_loop_stop_cb(void *ptr);
-static inline c_ThreadPool_node* c_ThreadPool_get_task(c_ThreadPool_st *pool);
+static inline c_ThreadPool_node* c_ThreadPool_get_task(c_ThreadPool_st *pool, bool isBlock);
 static inline bool c_ThreadPool_check_Buffer(c_ThreadPool_Buffer *buf);
 static inline void c_ThreadPool_charge_Buffer(c_ThreadPool_Buffer *buf, c_ThreadPool_queue *queue);
 static inline c_ThreadPool_node* c_ThreadPool_get_Buffer_front(c_ThreadPool_Buffer *buf);
@@ -153,6 +143,11 @@ ERROR_TAG:
 // タスク追加
 HEDER_INLINE int c_ThreadPool_add_task(c_ThreadPool_st *pool, c_pool_task *task_cb, void *data)
 {
+	return c_ThreadPool_add_task_ex(pool,task_cb,data,NULL);
+}
+
+HEDER_INLINE int c_ThreadPool_add_task_ex(c_ThreadPool_st *pool, c_pool_task *task_cb, void *data, c_pool_task *datafree_cb)
+{
     int error = 0;
     if (pool == NULL) {
         return -1;
@@ -172,13 +167,14 @@ HEDER_INLINE int c_ThreadPool_add_task(c_ThreadPool_st *pool, c_pool_task *task_
     /* ノードのタスクに追加 */
     node->data = data;
     node->task_cb = task_cb;
-
+    node->datafree_cb = datafree_cb;
+    
     int push_error = c_ThreadPool_queue_push_back(&(pool->add_queue), node);
     if (push_error) {
         error = push_error;
         goto ADD_TASK_ERROR;
     }
-    if (cnd_broadcast(&(pool->add_queue.cond))) {
+    if (cnd_signal(&(pool->add_queue.cond))) {
         error = -2;
         goto ADD_TASK_ERROR;
     }
@@ -207,6 +203,12 @@ HEDER_INLINE bool c_ThreadPool_waitTaskComplete(c_ThreadPool_st *pool) {
     mtx_unlock(&(pool->add_queue.wait_mutex));
     return empty != false;
 }
+
+HEDER_INLINE c_ThreadPool_node* c_ThreadPool_get_next_task(c_ThreadPool_st *pool)
+{
+    return c_ThreadPool_get_task(pool, false);
+}
+
 
 // 開放処理
 HEDER_INLINE void c_ThreadPool_free(c_ThreadPool_st *pool, int stop_mode)
@@ -238,14 +240,16 @@ static inline int c_ThreadPool_loop(void *data)
     c_ThreadPool_thrd *thrd = (c_ThreadPool_thrd*)data;
     c_ThreadPool_st* pool = thrd->parent;
     while (pool->isRunning && thrd->parent) {
-        task = c_ThreadPool_get_task(pool);
+        task = c_ThreadPool_get_task(pool, true);
         if (!task) {
             break;
         }
         if (task->task_cb) {
             task->task_cb(task->data);
-            C_THREADPOOL_TASK_INIT(task);
         }
+        if(task->datafree_cb){
+    	    task->datafree_cb(task->data);
+    	}
         free(task);
     }
     //TODO:parent空なら？スレッド開放
@@ -277,7 +281,10 @@ static inline int c_ThreadPool_loop_stop_cb(void *ptr)
         --(pool->num_of_threads);
     }
     c_ThreadPool_node* task = NULL;
-    while (task = c_ThreadPool_get_task(pool)) {
+    while (task = c_ThreadPool_get_task(pool, false)) {
+    	if(task->datafree_cb){
+    	    task->datafree_cb(task->data);
+    	}
         free(task);
     }
     free(pool->threads);
@@ -333,7 +340,7 @@ static inline int c_ThreadPool_queue_push_back(c_ThreadPool_queue *queue, c_Thre
 * @param c_ThreadPool_st
 * @return c_ThreadPool_task* or NULL
 */
-static inline c_ThreadPool_node* c_ThreadPool_get_task(c_ThreadPool_st *pool)
+static inline c_ThreadPool_node* c_ThreadPool_get_task(c_ThreadPool_st *pool, bool isBlock)
 {
     if (mtx_lock(&(pool->get_buffer.b_mutex))) {
         return NULL;
@@ -348,6 +355,10 @@ static inline c_ThreadPool_node* c_ThreadPool_get_task(c_ThreadPool_st *pool)
             if (!pool->isRunning) {
                 mtx_unlock(&(pool->add_queue.q_mutex));
                 cnd_broadcast(&(pool->add_queue.cond));
+                goto UNLOCK_GET_TASK;
+            }
+            if (isBlock == false) {
+                mtx_unlock(&(pool->add_queue.q_mutex));
                 goto UNLOCK_GET_TASK;
             }
             /* Block until a new task comes in */
@@ -380,7 +391,6 @@ static inline void c_ThreadPool_charge_Buffer(c_ThreadPool_Buffer *buf, c_Thread
 {
     buf->stock = buf->index = 0;
     c_ThreadPool_node* getNode;
-    uint32_t i = 0;
     do
     {
         getNode = c_ThreadPool_queue_pop_front(queue);
@@ -388,8 +398,7 @@ static inline void c_ThreadPool_charge_Buffer(c_ThreadPool_Buffer *buf, c_Thread
             break;
         }
         buf->nodeBuffer[(buf->stock)++] = getNode;
-        ++i;
-    } while (i < DEFAULT_BUFFER_SIZE);
+    } while (buf->stock < DEFAULT_BUFFER_SIZE);
 }
 
 /* BUFFERからデータ取得 */
@@ -402,7 +411,7 @@ static inline c_ThreadPool_node* c_ThreadPool_get_Buffer_front(c_ThreadPool_Buff
 /**
 promise(生成)処理
 */
-static inline promise_t* make_promise()
+HEDER_INLINE promise_t* make_promise()
 {
     promise_t* n_futuer = malloc(sizeof(promise_t));
     n_futuer->callbackFunc = NULL;
@@ -410,6 +419,10 @@ static inline promise_t* make_promise()
     n_futuer->result = NULL;
     n_futuer->state = 0;
     if (mtx_init(&(n_futuer->future_mutex), mtx_plain)) {
+        free(n_futuer);
+        return NULL;
+    }
+    if (cnd_init(&(n_futuer->cond))) {
         free(n_futuer);
         return NULL;
     }
@@ -438,33 +451,33 @@ static inline int asyncFunc(void *data)
     promise_t* n_futuer = (promise_t*)data;
     void *result = n_futuer->callbackFunc(n_futuer->data);
     if (!set_promise(n_futuer, result)) {
-        return 0;
     }
+    n_futuer->datafree_cb(n_futuer->data);
     return 0;
 }
 
 /**
 async処理
 */
-HEDER_INLINE promise_t* async_futuer(int state, async_task *routine, void *data)
-{
-    if (!routine) {
-        return NULL;
-    }
-    promise_t* n_futuer = make_promise();
-    n_futuer->callbackFunc = routine;
-    n_futuer->data = data;
-    n_futuer->state = state;
-    if (n_futuer->state == promise_async) {
-        thrd_t thr_det;
-        if (thrd_create(&thr_det, asyncFunc, n_futuer)) {
-            free(n_futuer);
-            return NULL;
-        }
-        thrd_detach(&thr_det);
-    }
-    return n_futuer;
-}
+//HEDER_INLINE promise_t* async_futuer(int state, async_task *routine, void *data, c_pool_task *datafree_cb)
+//{
+//    if (!routine) {
+//        return NULL;
+//    }
+//    promise_t* n_futuer = make_promise();
+//    n_futuer->callbackFunc = routine;
+//    n_futuer->data = data;
+//    n_futuer->state = state;
+//    n_futuer->datafree_cb = datafree_cb;
+//    if (n_futuer->state == promise_async) {
+//        n_futuer->thr = calloc(1,sizeof(thrd_t));
+//        if (thrd_create(&(n_futuer->thr), asyncFunc, n_futuer)) {
+//            free(n_futuer);
+//            return NULL;
+//        }
+//    }
+//    return n_futuer;
+//}
 
 /**
 async(pool)処理
@@ -503,6 +516,9 @@ HEDER_INLINE void* get_future(promise_t* n_futuer)
         }
         result = n_futuer->result;
         mtx_unlock(&(n_futuer->future_mutex));
+        //if (n_futuer->thr) {
+        //    thrd_join(*(n_futuer->thr), NULL);
+        //}
     }
     mtx_destroy(&n_futuer->future_mutex);
     cnd_destroy(&n_futuer->cond);
