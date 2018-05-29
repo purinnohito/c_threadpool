@@ -79,24 +79,14 @@ enum c_ThreadPool_stop_mode {
 */
 HEDER_INLINE void c_ThreadPool_free(c_ThreadPool_st *pool, int stop_mode);
 
-enum promise_state {
-    promise_non,
-    promise_finish,
-    promise_async,
+enum{
+    promise_async = 1,
     promise_deferred
 };
+typedef int promise_state;
 
-typedef struct promise_object_
-{
-    mtx_t future_mutex;
-    cnd_t cond;
-    volatile int    state;  //
-    async_task *callbackFunc;   //処理関数
-    c_pool_task *datafree_cb;
-    thrd_t* thr;
-    void *data;                 //引数データ
-    void *result;               //結果
-}promise_t;
+typedef struct promise_object_  promise_t;
+
 
 /**
 promise(生成)処理
@@ -110,12 +100,12 @@ HEDER_INLINE int set_promise(promise_t* n_futuer, void *result);
 /**
 async処理
 */
-//HEDER_INLINE promise_t* async_futuer(int state, async_task *routine, void *data, c_pool_task *datafree_cb);
+HEDER_INLINE promise_t* async_futuer(promise_state state, async_task *routine, void *data, c_pool_task *datafree_cb);
 
 /**
 async(pool)処理
 */
-HEDER_INLINE promise_t* async_pool(c_ThreadPool_st *pool, async_task *routine, void *data, int blocking);
+HEDER_INLINE promise_t* async_pool(c_ThreadPool_st *pool, async_task *routine, void *data, c_pool_task *datafree_cb);
 
 
 
@@ -123,10 +113,6 @@ HEDER_INLINE promise_t* async_pool(c_ThreadPool_st *pool, async_task *routine, v
 future処理
 */
 HEDER_INLINE void* get_future(promise_t* n_futuer);
-
-/**
-TODO:並列for処理
-*/
 
 
 #ifdef THAPOOL_HEADER_ONLY

@@ -407,6 +407,24 @@ static inline c_ThreadPool_node* c_ThreadPool_get_Buffer_front(c_ThreadPool_Buff
     return buf->nodeBuffer[(buf->index)++];
 }
 
+enum {
+    promise_non = 0,
+    promise_finish = promise_deferred + 1
+};
+
+
+struct promise_object_
+{
+    mtx_t                   future_mutex;
+    cnd_t                   cond;
+    volatile promise_state  state;  //
+    async_task              *callbackFunc;  //処理関数
+    c_pool_task             *datafree_cb;   //開放処理
+    c_ThreadPool_st         *pool;
+    void                    *data;          //引数データ
+    void                    *result;        //結果
+};
+
 
 /**
 promise(生成)処理
@@ -417,7 +435,8 @@ HEDER_INLINE promise_t* make_promise()
     n_futuer->callbackFunc = NULL;
     n_futuer->data = NULL;
     n_futuer->result = NULL;
-    n_futuer->state = 0;
+    n_futuer->pool = NULL;
+    n_futuer->state = promise_non;
     if (mtx_init(&(n_futuer->future_mutex), mtx_plain)) {
         free(n_futuer);
         return NULL;
@@ -452,37 +471,38 @@ static inline int asyncFunc(void *data)
     void *result = n_futuer->callbackFunc(n_futuer->data);
     if (!set_promise(n_futuer, result)) {
     }
-    n_futuer->datafree_cb(n_futuer->data);
+    if (n_futuer->datafree_cb) {
+        n_futuer->datafree_cb(n_futuer->data);
+    }
     return 0;
 }
 
 /**
 async処理
 */
-//HEDER_INLINE promise_t* async_futuer(int state, async_task *routine, void *data, c_pool_task *datafree_cb)
-//{
-//    if (!routine) {
-//        return NULL;
-//    }
-//    promise_t* n_futuer = make_promise();
-//    n_futuer->callbackFunc = routine;
-//    n_futuer->data = data;
-//    n_futuer->state = state;
-//    n_futuer->datafree_cb = datafree_cb;
-//    if (n_futuer->state == promise_async) {
-//        n_futuer->thr = calloc(1,sizeof(thrd_t));
-//        if (thrd_create(&(n_futuer->thr), asyncFunc, n_futuer)) {
-//            free(n_futuer);
-//            return NULL;
-//        }
-//    }
-//    return n_futuer;
-//}
+HEDER_INLINE promise_t* async_futuer(promise_state state, async_task *routine, void *data, c_pool_task *datafree_cb)
+{
+    if (!routine) {
+        return NULL;
+    }
+    promise_t* n_futuer = NULL;
+    if (state == promise_deferred) {
+        n_futuer = make_promise();
+        n_futuer->callbackFunc = routine;
+        n_futuer->data = data;
+    }
+    else {
+        c_ThreadPool_st *pool = c_ThreadPool_init_pool(1);
+        n_futuer = async_pool(pool, routine, data, datafree_cb);
+        n_futuer->pool = pool;
+    }
+    return n_futuer;
+}
 
 /**
 async(pool)処理
 */
-HEDER_INLINE promise_t* async_pool(c_ThreadPool_st *pool, async_task *routine, void *data, int blocking)
+HEDER_INLINE promise_t* async_pool(c_ThreadPool_st *pool, async_task *routine, void *data, c_pool_task *datafree_cb)
 {
     if (pool == NULL || !routine) {
         return NULL;
@@ -490,6 +510,7 @@ HEDER_INLINE promise_t* async_pool(c_ThreadPool_st *pool, async_task *routine, v
     promise_t* n_futuer = make_promise();
     n_futuer->callbackFunc = routine;
     n_futuer->data = data;
+    n_futuer->datafree_cb = datafree_cb;
     c_ThreadPool_add_task(pool, asyncFunc, n_futuer);
     return n_futuer;
 }
@@ -498,7 +519,6 @@ HEDER_INLINE promise_t* async_pool(c_ThreadPool_st *pool, async_task *routine, v
 
 /**
 future処理
-最適化禁止マーク必要
 */
 HEDER_INLINE void* get_future(promise_t* n_futuer)
 {
@@ -516,9 +536,9 @@ HEDER_INLINE void* get_future(promise_t* n_futuer)
         }
         result = n_futuer->result;
         mtx_unlock(&(n_futuer->future_mutex));
-        //if (n_futuer->thr) {
-        //    thrd_join(*(n_futuer->thr), NULL);
-        //}
+        if (n_futuer->pool) {
+            c_ThreadPool_free(n_futuer->pool, WAIT_COMPLETE);
+        }
     }
     mtx_destroy(&n_futuer->future_mutex);
     cnd_destroy(&n_futuer->cond);

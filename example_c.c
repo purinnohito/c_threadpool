@@ -78,8 +78,9 @@ void c_threadpool_example()
 }
 
 static inline void promise_task(void *ptr);
-//static inline void* async_task_func(void *ptr);
-//static inline void async_free_task(void *ptr);
+static inline void* async_task_func(void *ptr);
+static inline void async_free_task(void *ptr);
+static inline void* async_future_func(void *ptr);
 void future_example() {
     promise_t* promise = make_promise();
     /* promise - future */
@@ -87,16 +88,30 @@ void future_example() {
     c_ThreadPool_add_task(pool, promise_task, promise);
     c_ThreadPool_free(pool, WAIT_COMPLETE);
     int* getFuture = (int*)get_future(promise);
-    printf("promise - getFutue int=%d", (*getFuture));
+    printf("promise - getFutuer int=%d\n", (*getFuture));
     free(getFuture);
 
-    /* async  - future */
-    //int *data = malloc(sizeof(int));
-    //*data = 512;
-    //promise = async_futuer(promise_async, async_task_func, data, async_free_task);
-    //getFuture = (int*)get_future(promise);
-    //printf("promise - getFutue int=%d", (*getFuture));
-    //free(getFuture);
+    /* async(async) - future */
+    char asyncData[30] = "async task";
+    promise = async_futuer(promise_async, async_future_func, asyncData, NULL);
+    char* getStr = (char*)get_future(promise);
+    printf("async_futuer(async) - getFutuer str=%s\n", getStr);
+
+    /* async(deferred) - future */
+    strcpy_s(asyncData,29,"deferred task");
+    promise = async_futuer(promise_async, async_future_func, asyncData, NULL);
+    getStr = (char*)get_future(promise);
+    printf("async_futuer(promise_deferred) - getFutuer str=%s\n", getStr);
+
+    /* async pool  - future */
+    pool = c_ThreadPool_init_pool(1);
+    int *data = malloc(sizeof(int));
+    *data = 512;
+    promise = async_pool(pool, async_task_func, data, async_free_task);
+    getFuture = (int*)get_future(promise);
+    c_ThreadPool_free(pool, WAIT_COMPLETE);
+    printf("async_pool - getFutuer int=%d\n", (*getFuture));
+    free(getFuture);
 
     getchar();
 }
@@ -142,12 +157,17 @@ static inline void promise_task(void *ptr) {
     set_promise(promise, future);
 }
 
-//static inline void* async_task_func(void *ptr) {
-//    int *future = malloc(sizeof(int));
-//    *future = *((int*)ptr) *2;
-//    return future;
-//}
-//
-//static inline void async_free_task(void *ptr) {
-//    free(ptr);
-//}
+static inline void* async_task_func(void *ptr) {
+    int *future = malloc(sizeof(int));
+    *future = *((int*)ptr) *2;
+    return future;
+}
+
+static inline void async_free_task(void *ptr) {
+    free(ptr);
+}
+
+static inline void* async_future_func(void *ptr) {
+    printf("get string=%s\n", ptr);
+    return ptr;
+}
