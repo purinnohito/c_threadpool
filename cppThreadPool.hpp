@@ -1,4 +1,4 @@
-/*
+﻿/*
 cppThreadPool.hpp
 - ThreadPool & future promis
 
@@ -74,10 +74,10 @@ private:
         std::function<void(_P*)> func;
         _P* data;
     };
-    template<class _F, class _P>
-    bool addTaskFunc(_F func, void* data) {
+    template<class _F, class _P >
+    bool addTaskFunc(_F func, _P* data) {
         auto fst = new MyFunc_st<_P>;
-        fst->func = func;
+        fst->func = std::function<void(_P*)>(func);
         fst->data = data;
         int ret = c_ThreadPool_add_task_ex(_thPool.get(), cppThreadPool::lamdaCall<_P>, fst, cppThreadPool::delCall<_P>);
         return ret == 0;

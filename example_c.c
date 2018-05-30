@@ -1,4 +1,4 @@
-#include "threads.h"
+﻿#include "threads.h"
 #include "thapool.h"
 
 #include <stdio.h>
@@ -27,7 +27,7 @@ void c_threadpool_example()
     struct array_elem *arr = malloc(sizeof(struct array_elem)*ARRY_SIZE);
     c_ThreadPool_st *pool;
 
-    volatile ret, failed_count = 0;
+    volatile int ret, failed_count = 0;
 
     mtx_init(&count_mutex, mtx_plain);
     mtx_init(&(sum_mutex), mtx_plain);
